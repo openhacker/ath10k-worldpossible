@@ -10,6 +10,23 @@
 #include <linux/spinlock.h>
 #include <linux/bitops.h>
 
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdate-time"
+
+static char *buildtime = __FILE__ " "  __DATE__ " "  __TIME__;
+#pragma GCC diagnostic pop
+
+//xun+,2020.11.19
+#ifdef CONFIG_CMAL150_LED_INDICATOR //senao ath10k_led
+#include <linux/proc_fs.h>         /* Necessary because we use the proc fs */
+#include <asm/uaccess.h>           /* for copy_from_user */
+#include <linux/seq_file.h>
+
+#define ATH_PEREGRINE_LED 1 //senao
+#endif //end CONFIG_CMAL150_LED_INDICATOR
+//xun+,2020.11.19.end
+
 #include "core.h"
 #include "debug.h"
 #include "coredump.h"
@@ -2808,6 +2825,70 @@ static int ath10k_pci_chip_reset(struct ath10k *ar)
 	return ar_pci->pci_hard_reset(ar);
 }
 
+//xun+,2020.11.19
+#ifdef CONFIG_CMAL150_LED_INDICATOR //senao ath10k_led
+static struct ath10k *ar_proc[2];
+static struct proc_dir_entry *ath10k_proc[2];
+static u32 led_enabled = 1;
+static u32 proc_created = 0;
+
+#define PROCFS_NAME "ath10k_led"
+#define PERMS 0644
+#define PARENT NULL
+
+static int ath10k_led_proc_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "%u\n", led_enabled);
+	return 0;
+}
+
+static int ath10k_led_proc_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, ath10k_led_proc_show, NULL);
+}
+
+static ssize_t ath10k_led_proc_write(struct file *file,
+		const char __user *buffer, size_t count, loff_t *pos)
+{
+	char buf[] = "0x00000000\n";
+	size_t len = min(sizeof(buf) - 1, count);
+	u32 val;
+
+	if (copy_from_user(buf, buffer, len))
+		return count;
+	buf[len] = 0;
+	if (sscanf(buf, "%u", &val) != 1)
+		printk(KERN_INFO PROCFS_NAME
+		       ": %s is not in hex or decimal form.\n", buf);
+	else {
+		if (val) {
+			if (ar_proc[0])
+				ath10k_pci_write32(ar_proc[0], 0x1400c, ath10k_pci_read32(ar_proc[0], 0x1400c) | (1<<ATH_PEREGRINE_LED));
+			if (ar_proc[1])
+				ath10k_pci_write32(ar_proc[1], 0x1400c, ath10k_pci_read32(ar_proc[1], 0x1400c) | (1<<ATH_PEREGRINE_LED));
+		} 
+		else {
+			if (ar_proc[0])
+				ath10k_pci_write32(ar_proc[0], 0x1400c, ath10k_pci_read32(ar_proc[0], 0x1400c) & ~(1<<ATH_PEREGRINE_LED));
+			if (ar_proc[1])
+				ath10k_pci_write32(ar_proc[1], 0x1400c, ath10k_pci_read32(ar_proc[1], 0x1400c) & ~(1<<ATH_PEREGRINE_LED));
+		}
+	}
+
+	return strnlen(buf, len);
+}
+
+static const struct file_operations ath10k_led_proc_fops = {
+	.owner		= THIS_MODULE,
+	.open		= ath10k_led_proc_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+	.write		= ath10k_led_proc_write,
+};
+#endif //CONFIG_CMAL150_LED_INDICATOR,ath10k_led
+//xun+,2020.11.19.end
+
 static int ath10k_pci_hif_power_up(struct ath10k *ar,
 				   enum ath10k_firmware_mode fw_mode)
 {
@@ -3511,6 +3592,13 @@ static int ath10k_pci_probe(struct pci_dev *pdev,
 	int (*pci_hard_reset)(struct ath10k *ar);
 	u32 (*targ_cpu_to_ce_addr)(struct ath10k *ar, u32 addr);
 
+//xun+,2020.11.19
+#ifdef CONFIG_CMAL150_LED_INDICATOR //senao ath10k_led
+	struct proc_dir_entry *e;
+	char szbuff[16];
+#endif //end CONFIG_CMAL150_LED_INDICATOR
+//xun+,2020.11.19.end
+
 	switch (pci_dev->device) {
 	case QCA988X_2_0_DEVICE_ID_UBNT:
 	case QCA988X_2_0_DEVICE_ID:
@@ -3677,6 +3765,24 @@ static int ath10k_pci_probe(struct pci_dev *pdev,
 		goto err_free_irq;
 	}
 
+//xun+,2020.11.19
+#ifdef CONFIG_CMAL150_LED_INDICATOR //senao ath10k_led
+	snprintf(szbuff, sizeof(szbuff), "%s%d", PROCFS_NAME, proc_created);
+	e = proc_create(szbuff, S_IRUGO | S_IWUSR, ath10k_proc[proc_created],
+			&ath10k_led_proc_fops);
+	if (!e) {
+		remove_proc_entry(PROCFS_NAME, NULL);
+		ath10k_proc[proc_created] = NULL;
+		return -EIO;
+	}
+	else {
+		ath10k_info(ar, "create %s%d proc directory\n", PROCFS_NAME, proc_created);
+		ar_proc[proc_created] = ar;
+		proc_created += 1;
+	}
+#endif //end CONFIG_CMAL150_LED_INDICATOR
+//xun+,2020.11.19.end
+
 	return 0;
 
 err_unsupported:
@@ -3771,6 +3877,7 @@ static int __init ath10k_pci_init(void)
 {
 	int ret;
 
+	pr_info("%s\n", buildtime);
 	ret = pci_register_driver(&ath10k_pci_driver);
 	if (ret)
 		printk(KERN_ERR "failed to register ath10k pci driver: %d\n",
